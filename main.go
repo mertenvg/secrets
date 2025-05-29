@@ -24,7 +24,7 @@ import (
 var (
 	// App metadata
 	name    = "secrets"
-	version = "v1.0.0"
+	version = "v1.0.1"
 
 	// App configuration options
 	options struct {
@@ -199,28 +199,28 @@ func encryptFile(filename string, key []byte, dry bool, checkHash bool) error {
 
 	ciphertext := gcm.Seal(nonce, nonce, plaintext, nil)
 
-	if dry {
-		return nil
-	}
-
 	hextext := make([]byte, hex.EncodedLen(len(ciphertext)))
 	hex.Encode(hextext, ciphertext)
 
-	err = os.WriteFile(filename+encryptedFileExtension, chunkSplit(hextext, 64), 0600)
-	if err != nil {
-		return err
-	}
+	if !dry {
+		err = os.WriteFile(filename+encryptedFileExtension, chunkSplit(hextext, 64), 0600)
+		if err != nil {
+			return err
+		}
 
-	err = os.WriteFile(filename+hashFileExtension, textHash, 0600)
-	if err != nil {
-		return err
+		err = os.WriteFile(filename+hashFileExtension, textHash, 0600)
+		if err != nil {
+			return err
+		}
 	}
 
 	colorterm.Success(filename, "=>", filename+encryptedFileExtension, "+", filename+hashFileExtension)
 
-	err = os.Remove(filename)
-	if err != nil {
-		return err
+	if !dry {
+		err = os.Remove(filename)
+		if err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -274,13 +274,11 @@ func decryptFile(filename string, key []byte, dry bool, checkHash bool) error {
 		}
 	}
 
-	if dry {
-		return nil
-	}
-
-	err = os.WriteFile(filename, plaintext, 0600)
-	if err != nil {
-		return err
+	if !dry {
+		err = os.WriteFile(filename, plaintext, 0600)
+		if err != nil {
+			return err
+		}
 	}
 
 	colorterm.Success(filename+encryptedFileExtension, "=>", filename)
