@@ -9,7 +9,10 @@ go install github.com/mertenvg/secrets@latest
 ## Usage
 You may specify any number of files to lock and unlock along with each command. These will be combined with any files listed in a secrets.yaml configuration file.
 
-When using this tool for the first time on a project, if no key is provided one will be generated for you. Please make sure you store the key securely so you can unlock your files again when you need them.
+Locking and unlocking files requires a key, specified by a `-k` [`--key`] argument or a `SECRETS_KEY` environment variable. Don't worry if you don't have one yet.
+
+When using this tool for the first time on a project, if no key is provided, one will be generated for you. Please make sure you store the key securely so you can unlock your files again when you need it.
+
 ```shell
 # show help
 secrets -h
