@@ -14,6 +14,11 @@ Locking and unlocking files requires a key, specified by a `-k` [`--key`] argume
 When using this tool for the first time on a project, if no key is provided, one will be generated for you. Please make sure you store the key securely so you can unlock your files again when you need it.
 
 ```shell
+# export your secret key to your env if you have one
+export SECRETS_KEY="<your-secret-key>"
+# or add -k to your secrets commands like this
+secrets -k "<your-secret-key>" ...
+
 # show help
 secrets -h
 
