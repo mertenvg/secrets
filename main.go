@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -43,6 +44,8 @@ var (
 const (
 	encryptedFileExtension = ".enc"
 	hashFileExtension      = ".sha256"
+	hashVersionPrefix      = "v2:"
+	hashKDFContext         = "secrets:hmac-v1"
 )
 
 type Conf struct {
@@ -156,22 +159,59 @@ func generateRandomKey(length int) (string, error) {
 	return hex.EncodeToString(key), nil
 }
 
+// deriveHashKey derives a domain-separated MAC key from the master AES key
+// using a one-block HMAC-based KDF, so the same master key is not reused
+// directly across AES encryption and plaintext fingerprinting.
+func deriveHashKey(masterKey []byte) []byte {
+	mac := hmac.New(sha256.New, masterKey)
+	mac.Write([]byte(hashKDFContext))
+	return mac.Sum(nil)
+}
+
+// plaintextFingerprint returns the on-disk hash file contents for plaintext:
+// "v2:" + hex(HMAC-SHA256(deriveHashKey(masterKey), plaintext)).
+func plaintextFingerprint(plaintext, masterKey []byte) []byte {
+	mac := hmac.New(sha256.New, deriveHashKey(masterKey))
+	mac.Write(plaintext)
+	sum := mac.Sum(nil)
+	out := make([]byte, len(hashVersionPrefix)+hex.EncodedLen(len(sum)))
+	copy(out, hashVersionPrefix)
+	hex.Encode(out[len(hashVersionPrefix):], sum)
+	return out
+}
+
+// fingerprintMatches verifies whether stored matches plaintext. It accepts both
+// the v2 HMAC format and the legacy unprefixed SHA256(plaintext) hex written by
+// older versions, so existing .sha256 files keep verifying until the next lock
+// rewrites them.
+func fingerprintMatches(stored, plaintext, masterKey []byte) bool {
+	if bytes.HasPrefix(stored, []byte(hashVersionPrefix)) {
+		return hmac.Equal(stored, plaintextFingerprint(plaintext, masterKey))
+	}
+	legacy := sha256.Sum256(plaintext)
+	legacyHex := []byte(hex.EncodeToString(legacy[:]))
+	return hmac.Equal(stored, legacyHex)
+}
+
 func encryptFile(filename string, key []byte, dry bool, checkHash bool) error {
 	plaintext, err := os.ReadFile(filename)
 	if err != nil {
 		return err
 	}
 
-	hashArr := sha256.Sum256(plaintext)
-
-	textHash := []byte(hex.EncodeToString(hashArr[:]))
+	textHash := plaintextFingerprint(plaintext, key)
 
 	if checkHash {
 		hash, err := os.ReadFile(filename + hashFileExtension)
 		if err == nil {
-			if bytes.Equal(hash, textHash[:]) {
+			if fingerprintMatches(hash, plaintext, key) {
 				colorterm.Info(filename, "is unchanged")
 				if !dry {
+					if !bytes.HasPrefix(hash, []byte(hashVersionPrefix)) {
+						if err := os.WriteFile(filename+hashFileExtension, textHash, 0600); err != nil {
+							return err
+						}
+					}
 					err = os.Remove(filename)
 					if err != nil {
 						return err
@@ -261,15 +301,12 @@ func decryptFile(filename string, key []byte, dry bool, checkHash bool) error {
 		return err
 	}
 
-	// check that the hash of the plaintext is the same as the hash stored in file
 	if checkHash {
 		hash, err := os.ReadFile(filename + hashFileExtension)
 		if err != nil {
-			return err
+			return fmt.Errorf("decrypt: read hash file: %w", err)
 		}
-		hashArr := sha256.Sum256(plaintext)
-		textHash := []byte(hex.EncodeToString(hashArr[:]))
-		if !bytes.Equal(hash, textHash) {
+		if !fingerprintMatches(hash, plaintext, key) {
 			return fmt.Errorf("local file has unsaved changes, aborting. Use -f or --force to override local changes")
 		}
 	}

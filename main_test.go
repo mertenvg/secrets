@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"
@@ -90,9 +91,10 @@ func TestEncryptFile_WritesEncAndHashAndRemovesPlaintext(t *testing.T) {
 
 	hashBytes, err := os.ReadFile("secret.txt.sha256")
 	require.NoError(t, err)
-	assert.Len(t, hashBytes, 64, "current format is 64 hex chars (SHA256(plaintext)); PR 2 changes this")
-	_, err = hex.DecodeString(string(hashBytes))
-	assert.NoError(t, err, "hash file content must be valid hex")
+	assert.True(t, bytes.HasPrefix(hashBytes, []byte("v2:")), "v2 fingerprint format expected; got %q", hashBytes)
+	assert.Len(t, hashBytes, len("v2:")+64, "v2 fingerprint is prefix + 64 hex chars")
+	_, err = hex.DecodeString(string(hashBytes[len("v2:"):]))
+	assert.NoError(t, err, "v2 fingerprint payload must be valid hex")
 
 	_, err = os.Stat("secret.txt")
 	assert.True(t, os.IsNotExist(err), "plaintext should be removed after non-dry encrypt")
@@ -291,8 +293,109 @@ func TestDecryptFile_MissingHashFile(t *testing.T) {
 
 	err := decryptFile("secret.txt", key, false, true)
 	require.Error(t, err, "missing .sha256 must fail when checkHash is true")
+	assert.Contains(t, err.Error(), "decrypt: read hash file:", "missing .sha256 should be wrapped per code-quality convention")
 
 	if !strings.Contains(err.Error(), filepath.Base("secret.txt.sha256")) {
 		t.Logf("note: error did not name the hash file: %v", err)
 	}
+}
+
+func TestPlaintextFingerprint_Deterministic(t *testing.T) {
+	key := randomKey(t)
+	pt := []byte("deterministic content")
+	a := plaintextFingerprint(pt, key)
+	b := plaintextFingerprint(pt, key)
+	assert.Equal(t, a, b, "same key + plaintext must yield same fingerprint")
+	assert.True(t, bytes.HasPrefix(a, []byte("v2:")), "fingerprint must carry v2 prefix")
+	assert.Len(t, a, len("v2:")+64)
+}
+
+func TestPlaintextFingerprint_DiffersAcrossKeys(t *testing.T) {
+	pt := []byte("same plaintext")
+	a := plaintextFingerprint(pt, randomKey(t))
+	b := plaintextFingerprint(pt, randomKey(t))
+	assert.NotEqual(t, a, b, "different keys must produce different fingerprints (non-leaking property)")
+}
+
+func TestDeriveHashKey_DomainSeparated(t *testing.T) {
+	key := randomKey(t)
+	derived := deriveHashKey(key)
+	assert.Len(t, derived, 32, "HMAC-SHA256 output is 32 bytes")
+	assert.NotEqual(t, key, derived, "derived hash key must differ from master key")
+}
+
+func TestFingerprintMatches_AcceptsLegacySHA256(t *testing.T) {
+	pt := []byte("legacy plaintext")
+	key := randomKey(t)
+
+	h := sha256.Sum256(pt)
+	legacy := []byte(hex.EncodeToString(h[:]))
+
+	assert.True(t, fingerprintMatches(legacy, pt, key),
+		"legacy unprefixed SHA256 must still verify so existing .sha256 files keep working")
+
+	assert.False(t, fingerprintMatches(legacy, []byte("different plaintext"), key),
+		"legacy verify must reject mismatched plaintext")
+}
+
+func TestFingerprintMatches_RejectsModifiedV2(t *testing.T) {
+	pt := []byte("v2 plaintext")
+	key := randomKey(t)
+	stored := plaintextFingerprint(pt, key)
+	assert.True(t, fingerprintMatches(stored, pt, key))
+	assert.False(t, fingerprintMatches(stored, []byte("modified"), key))
+}
+
+func TestEncryptFile_UpgradesLegacyHashOnUnchangedPath(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	plaintext := []byte("legacy migration content")
+	writeFile(t, "secret.txt", plaintext)
+
+	key := randomKey(t)
+	require.NoError(t, encryptFile("secret.txt", key, false, false))
+
+	encBefore, err := os.ReadFile("secret.txt.enc")
+	require.NoError(t, err)
+
+	h := sha256.Sum256(plaintext)
+	legacy := []byte(hex.EncodeToString(h[:]))
+	writeFile(t, "secret.txt.sha256", legacy)
+
+	writeFile(t, "secret.txt", plaintext)
+	require.NoError(t, encryptFile("secret.txt", key, false, true))
+
+	upgraded, err := os.ReadFile("secret.txt.sha256")
+	require.NoError(t, err)
+	assert.True(t, bytes.HasPrefix(upgraded, []byte("v2:")),
+		"legacy hash should be upgraded to v2 format on the unchanged path; got %q", upgraded)
+	assert.Equal(t, plaintextFingerprint(plaintext, key), upgraded,
+		"upgraded hash must equal the v2 fingerprint of the same plaintext+key")
+
+	encAfter, err := os.ReadFile("secret.txt.enc")
+	require.NoError(t, err)
+	assert.Equal(t, encBefore, encAfter, "unchanged path must NOT re-encrypt the .enc file even when upgrading the hash")
+}
+
+func TestDecryptFile_AcceptsLegacyHash(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	plaintext := []byte("legacy decrypt content")
+	writeFile(t, "secret.txt", plaintext)
+
+	key := randomKey(t)
+	require.NoError(t, encryptFile("secret.txt", key, false, false))
+
+	h := sha256.Sum256(plaintext)
+	legacy := []byte(hex.EncodeToString(h[:]))
+	writeFile(t, "secret.txt.sha256", legacy)
+
+	require.NoError(t, decryptFile("secret.txt", key, false, true),
+		"decrypt must accept a legacy SHA256 .sha256 file paired with a matching .enc")
+
+	got, err := os.ReadFile("secret.txt")
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got)
 }
