@@ -91,10 +91,10 @@ func TestEncryptFile_WritesEncAndHashAndRemovesPlaintext(t *testing.T) {
 
 	hashBytes, err := os.ReadFile("secret.txt.sha256")
 	require.NoError(t, err)
-	assert.True(t, bytes.HasPrefix(hashBytes, []byte("v2:")), "v2 fingerprint format expected; got %q", hashBytes)
-	assert.Len(t, hashBytes, len("v2:")+64, "v2 fingerprint is prefix + 64 hex chars")
-	_, err = hex.DecodeString(string(hashBytes[len("v2:"):]))
-	assert.NoError(t, err, "v2 fingerprint payload must be valid hex")
+	assert.True(t, bytes.HasPrefix(hashBytes, []byte("hmac-sha256:")), "hmac fingerprint format expected; got %q", hashBytes)
+	assert.Len(t, hashBytes, len("hmac-sha256:")+64, "hmac fingerprint is prefix + 64 hex chars")
+	_, err = hex.DecodeString(string(hashBytes[len("hmac-sha256:"):]))
+	assert.NoError(t, err, "hmac fingerprint payload must be valid hex")
 
 	_, err = os.Stat("secret.txt")
 	assert.True(t, os.IsNotExist(err), "plaintext should be removed after non-dry encrypt")
@@ -306,8 +306,8 @@ func TestPlaintextFingerprint_Deterministic(t *testing.T) {
 	a := plaintextFingerprint(pt, key)
 	b := plaintextFingerprint(pt, key)
 	assert.Equal(t, a, b, "same key + plaintext must yield same fingerprint")
-	assert.True(t, bytes.HasPrefix(a, []byte("v2:")), "fingerprint must carry v2 prefix")
-	assert.Len(t, a, len("v2:")+64)
+	assert.True(t, bytes.HasPrefix(a, []byte("hmac-sha256:")), "fingerprint must carry hmac-sha256: prefix")
+	assert.Len(t, a, len("hmac-sha256:")+64)
 }
 
 func TestPlaintextFingerprint_DiffersAcrossKeys(t *testing.T) {
@@ -338,8 +338,8 @@ func TestFingerprintMatches_AcceptsLegacySHA256(t *testing.T) {
 		"legacy verify must reject mismatched plaintext")
 }
 
-func TestFingerprintMatches_RejectsModifiedV2(t *testing.T) {
-	pt := []byte("v2 plaintext")
+func TestFingerprintMatches_RejectsModifiedHMAC(t *testing.T) {
+	pt := []byte("hmac plaintext")
 	key := randomKey(t)
 	stored := plaintextFingerprint(pt, key)
 	assert.True(t, fingerprintMatches(stored, pt, key))
@@ -368,10 +368,10 @@ func TestEncryptFile_UpgradesLegacyHashOnUnchangedPath(t *testing.T) {
 
 	upgraded, err := os.ReadFile("secret.txt.sha256")
 	require.NoError(t, err)
-	assert.True(t, bytes.HasPrefix(upgraded, []byte("v2:")),
-		"legacy hash should be upgraded to v2 format on the unchanged path; got %q", upgraded)
+	assert.True(t, bytes.HasPrefix(upgraded, []byte("hmac-sha256:")),
+		"legacy hash should be upgraded to hmac format on the unchanged path; got %q", upgraded)
 	assert.Equal(t, plaintextFingerprint(plaintext, key), upgraded,
-		"upgraded hash must equal the v2 fingerprint of the same plaintext+key")
+		"upgraded hash must equal the hmac fingerprint of the same plaintext+key")
 
 	encAfter, err := os.ReadFile("secret.txt.enc")
 	require.NoError(t, err)

@@ -44,7 +44,7 @@ var (
 const (
 	encryptedFileExtension = ".enc"
 	hashFileExtension      = ".sha256"
-	hashVersionPrefix      = "v2:"
+	hashFormatPrefix       = "hmac-sha256:"
 	hashKDFContext         = "secrets:hmac-v1"
 )
 
@@ -169,23 +169,23 @@ func deriveHashKey(masterKey []byte) []byte {
 }
 
 // plaintextFingerprint returns the on-disk hash file contents for plaintext:
-// "v2:" + hex(HMAC-SHA256(deriveHashKey(masterKey), plaintext)).
+// "hmac-sha256:" + hex(HMAC-SHA256(deriveHashKey(masterKey), plaintext)).
 func plaintextFingerprint(plaintext, masterKey []byte) []byte {
 	mac := hmac.New(sha256.New, deriveHashKey(masterKey))
 	mac.Write(plaintext)
 	sum := mac.Sum(nil)
-	out := make([]byte, len(hashVersionPrefix)+hex.EncodedLen(len(sum)))
-	copy(out, hashVersionPrefix)
-	hex.Encode(out[len(hashVersionPrefix):], sum)
+	out := make([]byte, len(hashFormatPrefix)+hex.EncodedLen(len(sum)))
+	copy(out, hashFormatPrefix)
+	hex.Encode(out[len(hashFormatPrefix):], sum)
 	return out
 }
 
 // fingerprintMatches verifies whether stored matches plaintext. It accepts both
-// the v2 HMAC format and the legacy unprefixed SHA256(plaintext) hex written by
-// older versions, so existing .sha256 files keep verifying until the next lock
-// rewrites them.
+// the "hmac-sha256:" format and the legacy unprefixed SHA256(plaintext) hex
+// written by older versions, so existing .sha256 files keep verifying until
+// the next lock rewrites them.
 func fingerprintMatches(stored, plaintext, masterKey []byte) bool {
-	if bytes.HasPrefix(stored, []byte(hashVersionPrefix)) {
+	if bytes.HasPrefix(stored, []byte(hashFormatPrefix)) {
 		return hmac.Equal(stored, plaintextFingerprint(plaintext, masterKey))
 	}
 	legacy := sha256.Sum256(plaintext)
@@ -207,7 +207,7 @@ func encryptFile(filename string, key []byte, dry bool, checkHash bool) error {
 			if fingerprintMatches(hash, plaintext, key) {
 				colorterm.Info(filename, "is unchanged")
 				if !dry {
-					if !bytes.HasPrefix(hash, []byte(hashVersionPrefix)) {
+					if !bytes.HasPrefix(hash, []byte(hashFormatPrefix)) {
 						if err := os.WriteFile(filename+hashFileExtension, textHash, 0600); err != nil {
 							return err
 						}
