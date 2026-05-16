@@ -13,6 +13,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -25,7 +26,7 @@ import (
 var (
 	// App metadata
 	name    = "secrets"
-	version = "v1.0.1"
+	version = "dev"
 
 	// App configuration options
 	options struct {
@@ -50,6 +51,23 @@ const (
 
 type Conf struct {
 	Files []string `yaml:"files"`
+}
+
+func init() {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return
+	}
+	// VCS settings are embedded for local builds but absent when installed via
+	// `go install pkg@version` — only trust Main.Version in the latter case.
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" {
+			return
+		}
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		version = v
+	}
 }
 
 func main() {
