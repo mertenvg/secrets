@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/aes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -398,4 +399,82 @@ func TestDecryptFile_AcceptsLegacyHash(t *testing.T) {
 	got, err := os.ReadFile("secret.txt")
 	require.NoError(t, err)
 	assert.Equal(t, plaintext, got)
+}
+
+func TestDeriveKeyFromPassphrase_Length(t *testing.T) {
+	key, err := deriveKeyFromPassphrase("correct horse battery staple")
+	require.NoError(t, err)
+	assert.Len(t, key, 32, "derived key must be 32 bytes for AES-256")
+	_, err = aes.NewCipher(key)
+	assert.NoError(t, err, "derived key must be accepted by aes.NewCipher")
+}
+
+func TestDeriveKeyFromPassphrase_Deterministic(t *testing.T) {
+	a, err := deriveKeyFromPassphrase("a memorable passphrase")
+	require.NoError(t, err)
+	b, err := deriveKeyFromPassphrase("a memorable passphrase")
+	require.NoError(t, err)
+	assert.Equal(t, a, b, "same passphrase must derive the same key (fixed-salt reproducibility)")
+}
+
+func TestDeriveKeyFromPassphrase_DiffersAcrossPassphrases(t *testing.T) {
+	a, err := deriveKeyFromPassphrase("passphrase one is here")
+	require.NoError(t, err)
+	b, err := deriveKeyFromPassphrase("passphrase two is here")
+	require.NoError(t, err)
+	assert.NotEqual(t, a, b, "different passphrases must derive different keys")
+}
+
+func TestDeriveKeyFromPassphrase_RoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	plaintext := []byte("passphrase round trip\n")
+	writeFile(t, "secret.txt", plaintext)
+
+	key, err := deriveKeyFromPassphrase("a friendly multi-word passphrase")
+	require.NoError(t, err)
+
+	require.NoError(t, encryptFile("secret.txt", key, false, false))
+	require.NoError(t, decryptFile("secret.txt", key, false, false))
+
+	got, err := os.ReadFile("secret.txt")
+	require.NoError(t, err)
+	assert.Equal(t, plaintext, got, "a passphrase-derived key must round-trip encrypt/decrypt")
+}
+
+func TestValidatePassphrase(t *testing.T) {
+	tests := []struct {
+		name       string
+		passphrase string
+		wantErr    bool
+	}{
+		{"multi-word phrase", "correct horse battery staple", false},
+		{"hyphenated phrase", "Reef-Mango-Lantern-92", false},
+		{"exactly min length", "abcdef-12345", false}, // 12 distinct-enough chars
+		{"empty", "", true},
+		{"whitespace only collapses to empty", "          ", true},
+		{"too short", "short1!", true},
+		{"one under min", "abcdefghijk", true}, // 11 chars
+		{"all identical at min length", "aaaaaaaaaaaa", true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// readPassphrase trims before validating; mirror that here so the
+			// whitespace-only case reflects real behaviour.
+			err := validatePassphrase(strings.TrimSpace(tc.passphrase))
+			if tc.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestValidatePassphrase_TooShortMentionsMinimum(t *testing.T) {
+	err := validatePassphrase("short")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least 12 characters",
+		"too-short error should state the minimum length")
 }

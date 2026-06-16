@@ -13,11 +13,21 @@ Locking and unlocking files requires a key, specified by a `-k` [`--key`] argume
 
 When using this tool for the first time on a project, if no key is provided, one will be generated for you. Please make sure you store the key securely so you can unlock your files again when you need it.
 
+### Using a passphrase instead of a key
+
+If you'd rather use a human-friendly passphrase than a hex key, add the `-p` [`--passphrase`] flag. The tool then prompts for the passphrase interactively with **no echo**, so it never appears in your shell history, environment, or any file. The passphrase is stretched into the encryption key, and **takes precedence over** any `-k`/`SECRETS_KEY`. When locking, you'll be asked to re-enter it to confirm.
+
+A passphrase must be **at least 12 characters** — there are no uppercase/number/special-character requirements, so a memorable multi-word phrase like `correct horse battery staple` is both strong and easy to type. Choose a long passphrase: length is the main defense, because the same passphrase always derives the same key (so you can decrypt anywhere) but the encrypted files offer no rainbow-table protection.
+
 ```shell
 # export your secret key to your env if you have one
 export SECRETS_KEY="<your-secret-key>"
 # or add -k to your secrets commands like this
 secrets -k "<your-secret-key>" ...
+
+# or use a passphrase — you'll be prompted for it (and asked to confirm when locking)
+secrets -p -l file-one file-two   # prompts twice (enter + confirm), then locks
+secrets -p -u file-one file-two   # prompts once, then unlocks
 
 # show help
 secrets -h

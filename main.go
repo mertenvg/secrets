@@ -6,6 +6,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hmac"
+	"crypto/pbkdf2"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
@@ -14,10 +15,12 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/jessevdk/go-flags"
+	"golang.org/x/term"
 	"gopkg.in/yaml.v3"
 
 	"github.com/mertenvg/secrets/pkg/colorterm"
@@ -30,15 +33,16 @@ var (
 
 	// App configuration options
 	options struct {
-		Version bool   `long:"version" short:"v" description:"Display service name and version, then exit"`
-		Key     string `long:"key" short:"k" env:"SECRETS_KEY" default:"" description:"Optional secrets key (if empty, one will be provided)"`
-		Lock    bool   `long:"lock" short:"l" description:"Move secrets to encrypted files"`
-		Unlock  bool   `long:"unlock" short:"u" description:"Extract secrets from encrypted files"`
-		Force   bool   `long:"force" short:"f" description:"Forgo secrets hash checks and overwrite changes in unencrypted files"`
-		Dry     bool   `long:"dry" short:"d" description:"Dry run mode, lock or unlock without updating files"`
-		Wait    bool   `long:"wait" short:"w" description:"The number of minutes to wait before locking and exiting"`
-		Minutes int    `long:"minutes" short:"m" env:"SECRETS_WAIT_MINUTES" default:"10" description:"The number of minutes to wait before locking and exiting"`
-		Seconds int    `long:"seconds" short:"s" env:"SECRETS_WAIT_SECONDS" default:"0" description:"The number of seconds to wait before locking and exiting, may be used in conjunction with minutes"`
+		Version    bool   `long:"version" short:"v" description:"Display service name and version, then exit"`
+		Key        string `long:"key" short:"k" env:"SECRETS_KEY" default:"" description:"Optional secrets key (if empty, one will be provided)"`
+		Passphrase bool   `long:"passphrase" short:"p" description:"Prompt (no echo) for a passphrase instead of using a key; takes precedence over --key/SECRETS_KEY"`
+		Lock       bool   `long:"lock" short:"l" description:"Move secrets to encrypted files"`
+		Unlock     bool   `long:"unlock" short:"u" description:"Extract secrets from encrypted files"`
+		Force      bool   `long:"force" short:"f" description:"Forgo secrets hash checks and overwrite changes in unencrypted files"`
+		Dry        bool   `long:"dry" short:"d" description:"Dry run mode, lock or unlock without updating files"`
+		Wait       bool   `long:"wait" short:"w" description:"The number of minutes to wait before locking and exiting"`
+		Minutes    int    `long:"minutes" short:"m" env:"SECRETS_WAIT_MINUTES" default:"10" description:"The number of minutes to wait before locking and exiting"`
+		Seconds    int    `long:"seconds" short:"s" env:"SECRETS_WAIT_SECONDS" default:"0" description:"The number of seconds to wait before locking and exiting, may be used in conjunction with minutes"`
 	}
 )
 
@@ -47,6 +51,23 @@ const (
 	hashFileExtension      = ".sha256"
 	hashFormatPrefix       = "hmac-sha256:"
 	hashKDFContext         = "secrets:hmac-v1"
+
+	// passphraseKDFSalt is a FIXED application salt. The tool stores no
+	// key-derivation metadata, so a fixed salt is required for the same
+	// passphrase to reproducibly derive the same key across machines and
+	// invocations. This mirrors the fixed hashKDFContext domain separator.
+	// Tradeoff: the same passphrase derives the same key globally, with no
+	// rainbow-table protection; the high iteration count plus a strong
+	// passphrase are the defense. This value is a frozen on-disk contract —
+	// changing it makes previously-locked files undecryptable.
+	passphraseKDFSalt = "secrets:pbkdf2-v1"
+	// passphraseKDFIterations is the PBKDF2 work factor (OWASP recommendation
+	// for PBKDF2-HMAC-SHA256). Like the salt, this is a frozen contract.
+	passphraseKDFIterations = 600_000
+	// passphraseMinLength enforces a length-first policy (NIST SP 800-63B):
+	// length, not character-class composition, is the meaningful defense
+	// against offline brute-force, and it keeps passphrases human-friendly.
+	passphraseMinLength = 12
 )
 
 type Conf struct {
@@ -100,6 +121,28 @@ func main() {
 
 	for _, f := range args {
 		files = append(files, f)
+	}
+
+	// A passphrase, if requested, takes precedence over any configured key. We
+	// derive a 32-byte key from it and store the hex back into options.Key so the
+	// existing decode path below is unchanged and the auto-generate branch is
+	// skipped.
+	if options.Passphrase {
+		confirm := options.Lock || options.Wait // re-enter only when encryption will occur
+		passphrase, err := readPassphrase(confirm)
+		if err != nil {
+			colorterm.Error("Failed to read passphrase:", err)
+			os.Exit(1)
+		}
+		if options.Key != "" {
+			colorterm.Warning("A passphrase was provided; ignoring the configured key.")
+		}
+		derived, err := deriveKeyFromPassphrase(passphrase)
+		if err != nil {
+			colorterm.Error("Failed to derive key from passphrase:", err)
+			os.Exit(1)
+		}
+		options.Key = hex.EncodeToString(derived)
 	}
 
 	if options.Key == "" {
@@ -175,6 +218,67 @@ func generateRandomKey(length int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(key), nil
+}
+
+// deriveKeyFromPassphrase derives a 32-byte AES key from a human-friendly
+// passphrase using PBKDF2-HMAC-SHA256 with a fixed application salt.
+func deriveKeyFromPassphrase(passphrase string) ([]byte, error) {
+	return pbkdf2.Key(sha256.New, passphrase, []byte(passphraseKDFSalt), passphraseKDFIterations, 32)
+}
+
+// validatePassphrase enforces a length-first policy (NIST SP 800-63B): a minimum
+// length with no character-class requirements. Passphrase length, not composition
+// complexity, is the meaningful defense against offline brute-force, and it keeps
+// passphrases human-friendly.
+func validatePassphrase(passphrase string) error {
+	if n := len([]rune(passphrase)); n < passphraseMinLength {
+		return fmt.Errorf("passphrase must be at least %d characters (got %d)", passphraseMinLength, n)
+	}
+	if isAllSameRune(passphrase) {
+		return fmt.Errorf("passphrase must not be a single repeated character")
+	}
+	return nil
+}
+
+// isAllSameRune reports whether s consists entirely of one repeated character.
+func isAllSameRune(s string) bool {
+	runes := []rune(s)
+	if len(runes) == 0 {
+		return false
+	}
+	for _, r := range runes[1:] {
+		if r != runes[0] {
+			return false
+		}
+	}
+	return true
+}
+
+// readPassphrase prompts for a passphrase without echoing it, validates it, and —
+// when confirm is true (locking) — prompts a second time and requires a match.
+func readPassphrase(confirm bool) (string, error) {
+	fmt.Fprintf(os.Stderr, "Enter passphrase (min %d chars; a multi-word phrase works well): ", passphraseMinLength)
+	first, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stderr)
+	if err != nil {
+		return "", err
+	}
+	passphrase := strings.TrimSpace(string(first))
+	if err := validatePassphrase(passphrase); err != nil {
+		return "", err
+	}
+	if confirm {
+		fmt.Fprint(os.Stderr, "Confirm passphrase: ")
+		second, err := term.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(os.Stderr)
+		if err != nil {
+			return "", err
+		}
+		if passphrase != strings.TrimSpace(string(second)) {
+			return "", fmt.Errorf("passphrases do not match")
+		}
+	}
+	return passphrase, nil
 }
 
 // deriveHashKey derives a domain-separated MAC key from the master AES key
